@@ -1,0 +1,244 @@
+exec(open('./helpers.py').read())
+import codetiming, miceforest as mf
+with no_warn():
+    import flaml as fl
+from pgeocode import Nominatim
+from sklearn.metrics.pairwise import haversine_distances
+from sklearn import set_config
+set_config(transform_output="pandas")
+races = [f'race_{r}' for r in ['asian','black','hispanic','native','pacific','white']]
+catalog = 'dev.bronze.'
+username = globals().get('username', run_qry('select current_user()').squeeze().split('@')[0])
+flags_raw = pathlib.Path('/Volumes/aiml/scook/scook_files/admitted_flags_raw')
+flags_prc = pathlib.Path('/Volumes/aiml/flags/flags_volume/')
+root = pathlib.Path(f'/Volumes/aiml/amp/amp_files/{FORECAST_TERM_CODE}')
+stable = root/'stable'
+current = root/'current'
+output = root/username
+
+class Core(BaseCls):
+    def __init__(self, date, term_code=FORECAST_TERM_CODE, seed=42, **kwargs):
+        super().__init__(**kwargs)
+        self.date = dt_clip(date, weekday=2, upper=now.normalize())
+        self.term_code = int(term_code)
+        self.seed = seed
+        self.__dict__ |= self.get_dates(self.date, self.term_code)
+        self.get_states()
+
+
+    def get_dst(self, path, suffix='.parquet', **kwargs):
+        L = path.split('/')
+        return L[0], (kwargs.get('root', output)/join(L,'/')/join(L,'_')).with_suffix(suffix)
+
+
+    def run(self, fcn, path, prereq=[], *, read=True, keep=True, **kwargs):
+        nm, dst = self.get_dst(path, **kwargs)
+        if nm in REFRESH and dst not in REFRESHED:
+            rm(dst)
+            REFRESHED.append(dst)
+        new = False
+        if not nm in self:
+            if not dst.exists():
+                [f() for f in union(prereq)]
+                print(f'creating {dst}', end=': ')
+                with codetiming.Timer():
+                    self[nm] = dump(dst, fcn())
+                new = True
+                print(divider)
+            else:
+                self[nm] = load(dst) if read else None
+        return self[nm] if read and keep else self.pop(nm), new
+
+
+    def get_terminfo(self, show=False):
+        def fcn():
+            qry = f"""
+select
+    stvterm_code as term_code
+    ,replace(stvterm_desc, ' ', '') as term_desc
+    ,stvterm_start_date as start_date
+    ,stvterm_end_date as end_date
+    ,stvterm_fa_proc_yr as fa_proc_yr
+    ,stvterm_housing_start_date as housing_start_date
+    ,stvterm_housing_end_date as housing_end_date
+    ,sobptrm_census_date as census_date
+from
+    {catalog}saturnstvterm as A
+inner join
+    {catalog}saturnsobptrm as B
+on
+    stvterm_code = sobptrm_term_code
+where
+    sobptrm_ptrm_code='1'
+"""
+            df = run_qry(qry, show).set_index('term_code')
+            df['stable_date'] = df['census_date'].dt_clip(weekday=2) + pd.to_timedelta(14, 'D')
+            return df
+        return self.run(fcn, 'terminfo', root=stable, keep=False)[0]
+
+
+    def get_dates(self, date, term_code):
+        dct = {k: self.get_terminfo().loc[term_code,k] for k in ['term_desc','census_date','stable_date']}
+        dct['year'] = term_code // 100
+        dct['date'] = date
+        dct = {k: v.date() if isinstance(v, pd.Timestamp) else v for k,v in dct.items()}
+        dct['day'] = (dct['stable_date'] - dct['date']).days
+        # dct['day'] = (dct['stable_date'] - date).days
+        # dct['stem'] = f'{date.date()}_{term_code}_{"-" if dct["day"] < 0 else "+"}{rjust(abs(dct["day"]),3,0)}'
+        return dct
+
+
+    def get_zips(self):
+        def fcn():
+            df = (
+                Nominatim('us')._data  # get all zips
+                .prep()
+                .rename(columns={'postal_code':'zip'})
+                .query("state_code.notnull() & state_code not in [None,'mh']")
+            )
+            return df
+        return self.run(fcn, 'zips', root=stable)[0]
+
+
+    def get_states(self):
+        return union(self.get_zips()['state_code'])
+
+
+    def get_drivetimes(self):
+        def fcn():
+            print()
+            campus_coords = {
+                's': '-98.215784,32.216217',
+                'm': '-97.432975,32.582436',
+                'w': '-97.172176,31.587908',
+                'r': '-96.467920,30.642055',
+                'l': '-96.983211,32.462267',
+                }
+            def fcn1():
+                url = "https://www2.census.gov/geo/tiger/GENZ2020/shp/cb_2020_us_zcta520_500k.zip"
+                gdf = gpd.read_file(url).prep().set_index('zcta5ce20')  # get all ZCTA https://www.census.gov/programs-surveys/geography/guidance/geo-areas/zctas.html
+                return gdf.sample_points(size=10, method="uniform").explode().apply(lambda g: f"{g.x},{g.y}")  # sample 10 random points in each ZCT
+            M = []
+            for k, v in campus_coords.items():
+                def fcn2():
+                    pts, new = self.run(fcn1, stable, f'drivetimes/pts')
+                    L = []
+                    i = 0
+                    di = 200
+                    I = pts.shape[0]
+                    while i < I:
+                        u = join([v, *pts.iloc[i:i+di]],';')
+                        url = f"http://router.project-osrm.org/table/v1/driving/{u}?sources={0}&annotations=duration,distance&fallback_speed=1&fallback_coordinate=snapped"
+                        response = requests.get(url).json()
+                        L.append(np.squeeze(response['durations'])[1:]/60)
+                        i += di
+                        print(k,i,round(i/I*100))
+                    df = pts.to_frame()[[]]
+                    df[k] = np.concatenate(L)
+                    return df
+                df = self.run(fcn2, f'drivetimes/{k}', root=stable, keep=False)[0]
+                M.append(df)
+            D = pd.concat(M, axis=1).groupmy(level=0).min().stack().reset_index().set_axis(['zip','camp_code','drivetime'], axis=1).prep()
+            # There are a few USPS zips without equivalent ZCTA, so we assign them drivetimes for the nearest
+            Z = self.get_zips().merge(D.query("camp_code=='s'"), on='zip', how='left').set_index('zip')
+            mask = Z['drivetime'].isnull()  # zips without a ZTCA
+            Z = np.radians(Z[['latitude','longitude']])
+            X = Z[~mask]
+            Y = Z[mask]
+            M = (
+                pd.DataFrame(haversine_distances(X, Y), index=X.index, columns=Y.index) # haversine distance between pairs with and without ZCTA
+                .idxmin()  # find nearest ZCTA
+                .reset_index()
+                .set_axis(['new_zip','zip'], axis=1)
+                .merge(D, on='zip', how='left')  # merge the drivetimes for that ZCTA
+                .drop(columns='zip')
+                .rename(columns={'new_zip':'zip'})
+            )
+            df = pd.concat([D,M], ignore_index=True)
+            return df
+        return self.run(fcn, 'drivetimes', self.get_zips, root=stable)[0]
+
+
+    def get_spriden(self, show=False):
+        # Get id-pidm crosswalk so we can replace id by pidm in flags below
+        # GA's should not have permissions to run this because it can see pii
+        if 'spriden' not in self:
+            qry = f"""
+            select distinct
+                spriden_id as id
+                ,spriden_pidm as pidm
+                ,spriden_last_name as last_name
+                ,spriden_first_name as first_name
+
+            from
+                {catalog}saturnspriden as A
+            where
+                spriden_change_ind is null
+                and spriden_activity_date between '2000-09-01' and '2025-09-01'
+                and spriden_id REGEXP '^[0-9]+'
+            """
+            self.spriden = run_qry(qry, show)
+        return self.spriden
+
+
+    def get_flagsday(self, early_stop=3):
+        # GA's should not have permissions to run this because it can see pii
+        counter = 0
+        divide = False
+        for src in union(flags_raw.iterdir(), reverse=True):
+            counter += 1
+            if counter > early_stop:
+                break
+            stem, suff = src.name.lower().split('.')
+            if 'melt' in stem or 'admitted' not in stem or suff != 'xlsx':
+                print(stem, 'SKIP')
+                continue
+            # Handles 2 naming conventions that were used at different times
+            try:
+                current_date = pd.to_datetime(stem[:10].replace('_','-')).date()
+                multi = True
+            except:
+                try:
+                    current_date = pd.to_datetime(stem[-6:]).date()
+                    multi = False
+                except:
+                    print(stem, 'FAIL')
+                    continue
+            book = pd.ExcelFile(src, engine='openpyxl')
+            # Again, handles the 2 different versions with different sheet names
+            if multi:
+                sheets = {int(sheet): sheet for sheet in book.sheet_names if sheet.isnumeric()}
+            else:
+                sheets = {int(stem[:6]): book.sheet_names[0]}
+            for term_code, sheet in sheets.items():
+                if term_code in self.get_terminfo().index:
+                    def fcn():
+                        B = book.parse(sheet).prep()
+                        B['id'] = B['id'].prep(errors='coerce')  # CRITICAL step - id is stored as string dtype to allow leading 0's, but this opens the door for serious data entry errors (ex: ID="D") which can have catastrophic effects downstream.  This step convert such issues to null, which get removed during the merge below.
+                        mask = B['id'].isnull()
+                        if mask.any():
+                            print(f'WARNING: {mask.sum()} non-numeric ids')
+                            B[mask].disp(5)
+                        df = (
+                            self.get_spriden()[['pidm','id']]
+                            .assign(current_date=current_date)
+                            .merge(B, on='id', how='inner')
+                            .drop(columns=['id','last_name','first_name','mi','pref_fname','street1','street2','primary_phone','call_em_all','email'], errors='ignore')
+                        )
+                        df.loc[~df['state'].isin(self.get_states()),'zip'] = pd.NA
+                        df['zip'] = df['zip'].str.split('-').str[0].str[:5].prep(errors='coerce')
+                        with no_warn(UserWarning):
+                            for k in ['dob',*df.filter(like='date').columns]:  # convert date columns
+                                if k in df:
+                                    df[k] = pd.to_datetime(df[k], errors='coerce')
+                        return df
+                    if self.run(fcn, f'flagsday/{current_date}/{term_code}', root=flags_prc, read=False)[1]:
+                        counter = 0
+                        rm(self.get_dst(f'flagsyear/{term_code//100}', root=flags_prc)[1])
+
+
+    def get_flagsyear(self):
+        def fcn():
+            with no_warn(FutureWarning):
+                return pd.concat([load(src) for src in (flags_prc/'flagsday').rglob(f'**/{self.year}*/*.parquet')], ignore_index=True)
+        return self.run(fcn, f'flagsyear/{self.year}', root=flags_prc)[0]
