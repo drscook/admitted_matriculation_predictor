@@ -1,24 +1,7 @@
 exec(open('./students.py').read())
-from sklearn.metrics import log_loss
-def custom_log_loss(X_val, y_val, estimator, labels, X_train, y_train, weight_val=None, weight_train=None, config=None, groups_val=None, groups_train=None):
-    """Some (crse,styp) are entirely False which causes an error with built-in log_loss. We create a custom_log_loss simply to set labels=[False, True] https://microsoft.github.io/FLAML/docs/Use-Cases/Task-Oriented-AutoML/"""
-    start = time.time()
-    y_pred = estimator.predict_proba(X_val)
-    pred_time = (time.time() - start) / len(X_val)
-    val_loss = log_loss(y_val, y_pred, labels=[False,True], sample_weight=weight_val)
-    y_pred = estimator.predict_proba(X_train)
-    train_loss = log_loss(y_train, y_pred, labels=[False,True], sample_weight=weight_train)
-    return val_loss, {"val_loss": val_loss, "train_loss": train_loss, "pred_time": pred_time}
 
 class Term(Core):
-    def __init__(
-        self,
-        is_learner=True,
-        features=dict(),
-        subpops='styp_code',
-        aggregates=None,
-        flaml=dict(),
-        **kwargs):
+    def __init__(self, is_learner=True, features=dict(), subpops='styp_code', aggregates=None, flaml=dict(), **kwargs):
         super().__init__(**kwargs)
         self.is_learner = is_learner
         self.features = features
@@ -26,24 +9,9 @@ class Term(Core):
         self.aggregates = difference(union('crse_code', aggregates), subpops)
         self.flaml = flaml
         self.current = Students(**kwargs)
-        kwargs.pop('date')
+        kwargs.pop('date',None)
         self.stable = Students(date=self.stable_date, **kwargs)
         self.crse_code = '_headcnt'
-
-
-    def get_enrollments(self):
-        def fcn():
-            def fcn1(agg):
-                grp = union('crse_code', self.subpops, agg)
-                g = lambda X, Y: get_incoming(X).join(Y, how='left', rsuffix='_y').groupmy(grp)['count'].sum()  # get stuff from Y that is not in X
-                df = pd.DataFrame({
-                    'current':g(self.current.get_students(), self.stable.get_registrations()),
-                    'actual' :g(self.stable.get_registrations(), self.stable.get_students()),
-                    }).fillna(0)
-                df['mlt'] = df['actual'] / df['current']
-                return df.sort_index()
-            return {agg: fcn1(agg) for agg in self.aggregates}
-        return self.run(fcn, f'enrollments/{self.date}/{self.term_code}', [self.current.get_students, self.stable.get_students, self.stable.get_registrations], suffix='.pkl')[0]
 
 
     def get_imputed(self):
@@ -72,9 +40,25 @@ class Term(Core):
         return {s: fcn(X) for s, X in self.get_imputed().items()}
 
 
+    def get_enrollments(self):
+        def fcn():
+            def fcn1(agg):
+                grp = union('crse_code', self.subpops, agg)
+                g = lambda X, Y: get_incoming(X).join(Y, rsuffix='_drop').groupmy(grp)['count'].sum()  # get stuff from Y that is not in X
+                df = pd.DataFrame({
+                    'current':g(self.current.get_students(), self.stable.get_registrations()),
+                    'stable' :g(self.stable.get_registrations(), self.stable.get_students()),
+                    }).fillna(0)
+                df['mlt'] = df['stable'] / df['current']
+                return df.sort_index()
+            return {agg: fcn1(agg) for agg in self.aggregates}
+        return self.run(fcn, f'enrollments/{self.date}/{self.term_code}', [self.current.get_students, self.stable.get_students, self.stable.get_registrations], suffix='.pkl')[0]
+
+
     def get_learners(self):
         """train model - biggest bottleneck - can we run multiple (crse_code, year) in parallel?"""
-        assert self.is_learner
+        if not self.is_learner:
+            return None
         def fcn():
             def fcn1(s, Z):
                 dct = {
@@ -86,7 +70,8 @@ class Term(Core):
                     # 'log_type': 'all',
                     # 'log_training_metric':True,
                     'verbose':0,
-                    'metric':custom_log_loss,
+                    'metric':'log_loss',
+                    # 'metric':custom_log_loss,
                     'eval_method':'cv',
                     'n_splits':3,
                     'seed':self.seed,
@@ -97,21 +82,27 @@ class Term(Core):
                 learner.fit(*Z, **dct)
                 return learner
             return {s: fcn1(s, Z) for s, Z in self.get_prepared().items()}
-        return self.run(fcn, f'learners/{self.date}/{self.term_code}/{self.crse_code}', [self.get_imputed, self.current.get_registrations, self.stable.get_registrations], suffix='.pkl', keep=False)[0]
+        return self.run(fcn, f'learners/{self.date}/{self.term_code}/{self.crse_code}', [self.get_imputed, self.current.get_registrations, self.stable.get_registrations], suffix='.pkl')[0]
 
 
-    def get_predictions(self, model=None):
-        model = (model or self).set('crse_code', self.crse_code)
+    def get_predictions(self, modl=None):
+        modl = modl or self
+        modl.crse_code = self.crse_code
         def fcn():
             data = self.get_prepared()
-            learners = model.get_learners()
-            dct = {s: pd.DataFrame({'prediction': learners[s].predict_proba(X).T[1], 'actual':y}) for s, [X, y] in data.items()}
-            return (
-                pd.concat(dct, names=union(self.subpops, 'pidm'))
-                .assign(error=lambda X: X['prediction'] - X['actual'])
-                .join(model.get_enrollments()['crse_code'].loc[model.crse_code, 'mlt'])
-            )
-            # L = [pd.DataFrame({'prediction': learners[subpop].predict_proba(X).T[1], 'actual':y}) for subpop, [X, y] in data.items()]
-            # pred = pd.concat(L).assign(error=lambda X: X['prediction'] - X['actual'])
-            return pred
-        return self.run(fcn, f'predictions/{self.date}/{self.term_code}/{self.crse_code}/{model.term_code}', [self.get_prepared, model.get_learners], keep=False)[0]
+            learners = modl.get_learners()
+            dct = {s: pd.DataFrame({'prediction': l.predict_proba(data[s][0]).T[1], 'actual':data[s][1], 'cv_score': 100*l.best_loss}) for s, l in learners.items()}
+            return pd.concat(dct, names=self.subpops)
+        return self.run(fcn, f'predictions/{self.date}/{self.term_code}/{self.crse_code}/{modl.term_code}', [self.get_prepared, modl.get_learners])[0]
+
+
+# from sklearn.metrics import log_loss
+# def custom_log_loss(X_val, y_val, estimator, labels, X_train, y_train, weight_val=None, weight_train=None, config=None, groups_val=None, groups_train=None):
+#     """Some (crse,styp) are entirely False which causes an error with built-in log_loss. We create a custom_log_loss simply to set labels=[False, True] https://microsoft.github.io/FLAML/docs/Use-Cases/Task-Oriented-AutoML/"""
+#     start = time.time()
+#     y_pred = estimator.predict_proba(X_val)
+#     pred_time = (time.time() - start) / len(X_val)
+#     val_loss = log_loss(y_val, y_pred, labels=[False,True], sample_weight=weight_val)
+#     y_pred = estimator.predict_proba(X_train)
+#     train_loss = log_loss(y_train, y_pred, labels=[False,True], sample_weight=weight_train)
+#     return val_loss, {"val_loss": val_loss, "train_loss": train_loss, "pred_time": pred_time}

@@ -5,7 +5,7 @@ from copy import deepcopy as copy
 pd.options.display.max_columns = None
 pd.options.future.no_silent_downcasting = True
 now = pd.Timestamp.now(tz='America/Chicago').tz_localize(None)
-divider = '#'*100
+divider = '#'*120
 
 ############ Misc functions ############
 
@@ -173,7 +173,6 @@ def prep_data(X, str_fcn=None, category=False, downcast='integer', **kwargs):
             if tp.is_datetime64_any_dtype(ser) or str(ser.dtype) in ['category','geometry']:
                 pass
             elif tp.is_string_dtype(ser) or tp.is_object_dtype(ser):
-            
                 ser = ser.astype('string').apply(safe(str_fcn))
                 try:
                     ser = pd.to_numeric(ser, downcast=downcast, **kwargs)
@@ -189,10 +188,13 @@ def prep_data(X, str_fcn=None, category=False, downcast='integer', **kwargs):
     return wrap1(fcn, X)
 setmeth_pd(prep_data)
 
-def prep(X, str_fcn=lambda x: x.strip().lower(), col_fcn=lambda x: x.strip().lower().replace(' ','_').replace('-','_'), **kwargs):
+def prep(X, str_fcn=lambda x: x.strip().lower(), col_fcn=lambda x: x.strip().lower().replace(' ','_').replace('-','_'), idx=True, col=True, **kwargs):
     def fcn(df):
-        L = [prep_data(Y, str_fcn, **kwargs).rename(columns=safe(col_fcn)) for Y in [df.reset_index(drop=True), df[[]].reset_index()]]
-        return L[0].set_index(pd.MultiIndex.from_frame(L[1]))
+        I, C = df[[]].reset_index(), df.reset_index(drop=True)
+        g = lambda X: prep_data(X, str_fcn, **kwargs).rename(columns=safe(col_fcn))
+        I = g(I) if idx else I
+        C = g(C) if col else C
+        return C.set_index(pd.MultiIndex.from_frame(I))
     return wrap2(fcn, X)
 setmeth_pd(prep)
 
@@ -287,7 +289,9 @@ def dump(path, obj, **kwargs):
             pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL, **kwargs)
     return obj
 
-def load(path, **kwargs):
+#read_parquet reverts index to pre-nullable dtypes
+#to fix this bug without doing unnecessary work on colums, we prep index only
+def load(path, idx=True, col=False, **kwargs):
     p = pathify(path)
     if p.suffix == '.parquet':
         try:
@@ -302,4 +306,4 @@ def load(path, **kwargs):
         except:
             with open(p, 'rb') as f:
                 obj = pickle.load(f, **kwargs)
-    return prepr(obj)
+    return prepr(obj, idx=idx, col=col)

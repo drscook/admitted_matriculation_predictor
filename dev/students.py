@@ -26,14 +26,7 @@ class Students(Core):
 
     def get_flags(self):
         def fcn():
-            df = (
-                self.get_flagsyear()
-                .query(f"current_date<='{self.date}'")
-                .sort_values(['pidm','term_code','current_date'])
-                .drop_duplicates(subset=['pidm','term_code'], keep='last')
-            )
-            get_duplicates(df, ['pidm','term_code'])
-            return df
+            return self.get_flagsyear().query(f"current_date<='{self.date}'").sort_values('current_date').drop_duplicates(subset=['pidm','term_code'], keep='last')
         return self.run(fcn, f'flags/{self.date}/{self.term_code}', self.get_flagsyear, root=current)[0]
 
 
@@ -151,17 +144,14 @@ where
     credit_hr > 0
     and subj_code <> 'INST'""")
                 A = run_qry(qry, show)
-                B = A.groupmy(['pidm','crse_code'])['count'].sum().reset_index('crse_code')
-                C = B.groupmy('pidm')[['count']].sum().assign(crse_code='_tot_sch')
+                B = A.groupmy(['pidm','crse_code'])[['count']].sum().reset_index('crse_code') #combine if enrolled in >1 crn for same crse_code (rare)
+                C = B.groupmy('pidm')[['count']].sum() #compute total sch
                 D = C.copy()
-                B['count'] = 1
-                D['count'] = 1
-                D['crse_code'] = '_headcnt'
-                E = D.copy()
-                E['crse_code'] = '_proba'
-                F = pd.concat([B,C,D,E])
-                G = A.drop(columns=['count','crse_code']).sort_values('current_date').groupmy('pidm').last()
-                df = G.join(F)
+                B['count'] = 1 #crse_code headcount
+                D['count'] = 1 #overall headcount
+                E = pd.concat([B, C.assign(crse_code='_tot_sch'), D.assign(crse_code='_headcnt'), D.assign(crse_code='_proba')])
+                F = A.drop(columns=['count','crse_code']).sort_values('current_date').groupmy('pidm').last()
+                df = F.join(E)
             else:
                 # placeholder if table DNE
                 df = pd.DataFrame(columns=['pidm','levl_code','styp_code','count','crse_code']).set_index('pidm')
@@ -199,8 +189,8 @@ where
             #goal: exclude a pidm if it has ANY application where levl_coee!='ug' (even if it also has one with levl_code=='ug'), then keep the highest appl_no for each pidm
             df = (
                 pd.concat(L, ignore_index=True)
-                .sort_values(['levl_code','appl_no'], ascending=[True,False]) #levl_code='ug' sorts to bottom
-                .drop_duplicates(subset='pidm', keep='first') #for each pidm, keeps a non-ug row (if any) or the highest appl_no otherwise ... will remove non-ug rows below
+                .sort_values(['levl_code','appl_no'], ascending=[False,True]) #sorts levl_code='ug' to top and any levl_code!='ug' to bottom
+                .drop_duplicates(subset='pidm', keep='last') #for each pidm, keeps a levl_code!='ug' row (if any) otherwise highest levl_code='ug' appl_no ... we will remove non-ug rows below
             )
             return get_incoming(df)
         return self.run(fcn, f'admissions/{self.date}/{self.term_code}', root=current)[0]
@@ -213,7 +203,16 @@ where
                 .merge(self.get_flags(), on=['pidm','term_code'], how='left', suffixes=['', '_drop'])
                 .merge(self.get_drivetimes(), on=['zip','camp_code'], how='left', suffixes=['', '_drop'])
                 .prep()
+                .set_index('pidm')
             )
+            get_duplicates(df)
+            M = df.query('current_date_drop.isnull()') #admissions missing flags record
+            if not M.empty:
+                M.sort_values('first_date').disp(10)
+                if M.shape[0] > 10:
+                    raise Exception('Too many unmatched incoming students')
+            df = df.drop(columns=df.filter(like='_drop'))
+            
             for c in ['gap_score','t_gap_score','ftic_gap_score']:
                 if c not in df:
                     df[c] = pd.NA
@@ -235,12 +234,5 @@ where
             df['resd'] = df['resd_code'] == 'r'
             for k in ['waiver_desc','fafsa_app','ssb_last_accessed','finaid_accepted','schlship_app']:
                 df[k.split('_')[0]] = df[k].notnull()
-            
-            get_duplicates(df, 'pidm')
-            M = df.query('current_date_drop.isnull()') #admissions missing flags record
-            if not M.empty:
-                M.sort_values('first_date').disp(10)
-                if M.shape[0] > 10:
-                    raise Exception('Too many unmatched incoming students')
-            return df.drop(columns=df.filter(like='_drop')).set_index('pidm').sort_index()
+            return df
         return self.run(fcn, f'students/{self.date}/{self.term_code}', [self.get_drivetimes, self.get_flags, self.get_admissions], root=current)[0]
