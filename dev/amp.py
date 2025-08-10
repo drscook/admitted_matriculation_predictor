@@ -12,7 +12,7 @@ class AMP(Core):
 
 
     def setup(self):
-        for fcn in [t['get_'+k] for k in ['flagsyear', 'enrollments', 'learners'] for t in self.terms.values()]:
+        for fcn in [t['get_'+k] for k in ['flagsyear', 'enrollments', 'imputed', 'learners'] for t in self.terms.values()]:
             fcn()
 
 

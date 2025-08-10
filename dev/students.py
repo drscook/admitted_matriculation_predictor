@@ -26,8 +26,10 @@ class Students(Core):
 
     def get_flags(self):
         def fcn():
-            return self.get_flagsyear().query(f"current_date<=@self.date").sort_values('current_date').drop_duplicates(subset=['pidm','term_code'], keep='last')
-            # return self.get_flagsyear().query(f"current_date<='{self.date}'").sort_values('current_date').drop_duplicates(subset=['pidm','term_code'], keep='last')
+            F = self.get_flagsyear()
+            df = F.query(f"current_date<=@self.date").sort_values('current_date').drop_duplicates(subset=['pidm','term_code'], keep='last')
+            del F
+            return df
         return self.run(fcn, f'flags/{self.date}/{self.term_code}', self.get_flagsyear, root=raw)[0]
 
 
