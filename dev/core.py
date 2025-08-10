@@ -1,29 +1,28 @@
 exec(open('./helpers.py').read())
-import codetiming, miceforest as mf
-with no_warn():
-    import flaml as fl
+import codetiming
 from pgeocode import Nominatim
 from sklearn.metrics.pairwise import haversine_distances
-from sklearn import set_config
-set_config(transform_output="pandas")
-races = [f'race_{r}' for r in ['asian','black','hispanic','native','pacific','white']]
 catalog = 'dev.bronze.'
 username = globals().get('username', run_qry('select current_user()').squeeze().split('@')[0])
+races = [f'race_{r}' for r in ['asian','black','hispanic','native','pacific','white']]
 flags_raw = pathlib.Path('/Volumes/aiml/scook/scook_files/admitted_flags_raw')
 flags_prc = pathlib.Path('/Volumes/aiml/flags/flags_volume/')
 root = pathlib.Path(f'/Volumes/aiml/amp/amp_files/{FORECAST_TERM_CODE}')
-stable = root/'stable'
-current = root/'current'
+const = root/'const'
+raw = root/'raw'
 output = root/username
 
 class Core(BaseCls):
     def __init__(self, date=now, term_code=FORECAST_TERM_CODE, seed=42, **kwargs):
         super().__init__(**kwargs)
-        self.date = dt_clip(date, weekday=2, upper=now.normalize())
+        self.seed = int(seed)
         self.term_code = int(term_code)
-        self.seed = seed
-        self.__dict__ |= self.get_dates(self.date, self.term_code)
-        self.get_states()
+        self.year = self.term_code // 100
+        self.term_desc, self.census_date = self.get_terminfo().loc[self.term_code,['term_desc','census_date']]
+        self.date = dt_clip(date, weekday=2).date()
+        self.stable_date = dt_clip(self.census_date + pd.to_timedelta(14,'D'), weekday=2).date()
+        self.day = (self.stable_date - self.date).days
+        del self.census_date
 
 
     def get_dst(self, path, suffix='.parquet', **kwargs):
@@ -31,7 +30,7 @@ class Core(BaseCls):
         return L[0], (kwargs.get('root', output)/join(L,'/')/join(L,'_')).with_suffix(suffix)
 
 
-    def run(self, fcn, path, prereq=[], *, read=True, **kwargs):
+    def run(self, fcn, path, prereq=[], read=True, **kwargs):
         nm, dst = self.get_dst(path, **kwargs)
         if nm in REFRESH and dst not in REFRESHED:
             rm(dst)
@@ -70,18 +69,8 @@ where
     sobptrm_ptrm_code='1'
 """
             df = run_qry(qry, show)
-            df['stable_date'] = df['census_date'].dt_clip(weekday=2) + pd.to_timedelta(14, 'D')
             return df
-        return self.run(fcn, 'terminfo', root=stable)[0].set_index('term_code')
-
-
-    def get_dates(self, date, term_code):
-        dct = {k: self.get_terminfo().loc[term_code,k] for k in ['term_desc','census_date','stable_date']}
-        dct['year'] = term_code // 100
-        dct['date'] = date
-        dct = {k: v.date() if isinstance(v, pd.Timestamp) else v for k,v in dct.items()}
-        dct['day'] = (dct['stable_date'] - dct['date']).days
-        return dct
+        return self.run(fcn, 'terminfo', root=const)[0].set_index('term_code')
 
 
     def get_zips(self):
@@ -93,7 +82,7 @@ where
                 .query("state_code.notnull() & state_code not in [None,'mh']")
             )
             return df
-        return self.run(fcn, 'zips', root=stable)[0]
+        return self.run(fcn, 'zips', root=const)[0]
 
 
     def get_states(self):
@@ -131,7 +120,7 @@ where
                     df = pts.to_frame()[[]]
                     df[k] = np.concatenate(L)
                     return df
-                df = self.run(fcn2, f'drivetimes/{k}', root=stable)[0]
+                df = self.run(fcn2, f'drivetimes/{k}', root=const)[0]
                 M.append(df)
             D = pd.concat(M, axis=1).groupmy(level=0).min().stack().reset_index().set_axis(['zip','camp_code','drivetime'], axis=1).prep()
             # There are a few USPS zips without equivalent ZCTA, so we assign them drivetimes for the nearest
@@ -151,7 +140,7 @@ where
             )
             df = pd.concat([D,M], ignore_index=True)
             return df
-        return self.run(fcn, 'drivetimes', self.get_zips, root=stable)[0]
+        return self.run(fcn, 'drivetimes', self.get_zips, root=const)[0]
 
 
     def get_spriden(self, show=False):
@@ -176,8 +165,8 @@ where
         return self.spriden
 
 
-    def get_flagsday(self, early_stop=3):
-        # GA's should not have permissions to run this because it can see pii
+    def get_flagsday(self, early_stop=10):
+        # GA's should not have permissions to run this because it sees pii
         counter = 0
         divide = False
         for src in union(flags_raw.iterdir(), reverse=True):
@@ -206,34 +195,40 @@ where
             else:
                 sheets = {int(stem[:6]): book.sheet_names[0]}
             for term_code, sheet in sheets.items():
-                if term_code in self.get_terminfo().index:
-                    def fcn():
-                        B = book.parse(sheet).prep()
-                        B['id'] = B['id'].prep(errors='coerce')  # CRITICAL step - id is stored as string dtype to allow leading 0's, but this opens the door for serious data entry errors (ex: ID="D") which can have catastrophic effects downstream.  This step convert such issues to null, which get removed during the merge below.
-                        mask = B['id'].isnull()
-                        if mask.any():
-                            print(f'WARNING: {mask.sum()} non-numeric ids')
-                            B[mask].disp(5)
-                        df = (
-                            self.get_spriden()[['pidm','id']]
-                            .assign(current_date=current_date)
-                            .merge(B, on='id', how='inner')
-                            .drop(columns=['id','last_name','first_name','mi','pref_fname','street1','street2','primary_phone','call_em_all','email'], errors='ignore')
-                        )
-                        df.loc[~df['state'].isin(self.get_states()),'zip'] = pd.NA
-                        df['zip'] = df['zip'].str.split('-').str[0].str[:5].prep(errors='coerce')
-                        with no_warn(UserWarning):
-                            for k in ['dob',*df.filter(like='date').columns]:  # convert date columns
-                                if k in df:
-                                    df[k] = pd.to_datetime(df[k], errors='coerce')
-                        return df
-                    if not self.run(fcn, f'flagsday/{current_date}/{term_code}', root=flags_prc, read=False)[1]:
-                        counter = 0
-                        rm(self.get_dst(f'flagsyear/{term_code//100}', root=flags_prc)[1])
+                # if term_code in self.get_terminfo().index:  # not sure whether this is still necessary after recent revision
+                def fcn():
+                    B = book.parse(sheet).prep()
+                    B['id'] = B['id'].prep(errors='coerce')  # CRITICAL step - id is stored as string dtype to allow leading 0's, but this opens the door for serious data entry errors (ex: ID="D") which can have catastrophic effects downstream.  This step convert such issues to null, which get removed during the merge below.
+                    mask = B['id'].isnull()
+                    if mask.any():
+                        print(f'WARNING: {mask.sum()} non-numeric ids')
+                        B[mask].disp(5)
+                    df = (
+                        self.get_spriden()[['pidm','id']]
+                        .assign(current_date=current_date)
+                        .merge(B, on='id', how='inner')
+                        .drop(columns=['id','last_name','first_name','mi','pref_fname','street1','street2','primary_phone','call_em_all','email'], errors='ignore')
+                    )
+                    df.loc[~df['state'].isin(self.get_states()),'zip'] = pd.NA
+                    df['zip'] = df['zip'].str.split('-').str[0].str[:5].prep(errors='coerce')
+                    with no_warn(UserWarning):
+                        for k in ['dob',*df.filter(like='date').columns]:  # convert date columns
+                            if k in df:
+                                df[k] = pd.to_datetime(df[k], errors='coerce')
+                    return df
+                if not self.run(fcn, f'flagsday/{current_date}/{term_code}', root=flags_prc, read=False)[1]:
+                    counter = 0
+                    rm(self.get_dst(f'flagsyear/{term_code//100}', root=flags_prc)[1])
 
 
     def get_flagsyear(self):
+        # may hit memory limits running get_flagsyear - just restart kernel and try again
         def fcn():
             with no_warn(FutureWarning):
-                return pd.concat([load(src) for src in (flags_prc/'flagsday').rglob(f'**/{self.year}*/*.parquet')], ignore_index=True)
+                L = [load(src) for src in (flags_prc/'flagsday').rglob(f'**/{self.year}*/*.parquet')]
+                df = pd.concat(L, ignore_index=True)
+                for X in L:
+                    del X
+                return df
+                # return pd.concat([load(src) for src in (flags_prc/'flagsday').rglob(f'**/{self.year}*/*.parquet')], ignore_index=True)
         return self.run(fcn, f'flagsyear/{self.year}', root=flags_prc)[0]

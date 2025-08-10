@@ -1,7 +1,8 @@
-import  os, sys, pathlib, shutil, pickle, warnings, contextlib, requests, functools, time, dataclasses
-import numpy as np, pandas as pd, geopandas as gpd, pyarrow.parquet as pq, matplotlib.pyplot as plt
+import  os, sys, pathlib, shutil, pickle, warnings, contextlib, requests, copy, functools, time, dataclasses
+import numpy as np, pandas as pd, geopandas as gpd, matplotlib.pyplot as plt
 from IPython.display import clear_output, display
-from copy import deepcopy as copy
+from sklearn import set_config
+set_config(transform_output="pandas")
 pd.options.display.max_columns = None
 pd.options.future.no_silent_downcasting = True
 now = pd.Timestamp.now(tz='America/Chicago').tz_localize(None)
@@ -134,7 +135,7 @@ def disp(X, n_rows=4, ascending=None):
             df = df.rename(columns=lambda x: str(x)).sort_index(axis=1, ascending=ascending)
         miss = df.isnull()
         info = pd.DataFrame({'dtype':df.dtypes.astype('string'), 'missing_cnt':miss.sum(), 'missing_pct':miss.mean().round(3)*100}).T
-        print(df.shape)
+        # print(df.shape)
         display(info)
         with pd.option_context('display.max_rows', n_rows, 'display.min_rows', n_rows):
             display(df)
@@ -208,7 +209,7 @@ def prepr(X, **kwargs):
     else:
         return X
     
-def dt_clip(X=now, weekday=None, lower=None, upper=None):
+def dt_clip(X=now, weekday=None, lower=None, upper=now):
     def fcn(ser):
         s = pd.Series(pd.to_datetime(ser))
         l = pd.to_datetime(lower)

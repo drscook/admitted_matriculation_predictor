@@ -3,16 +3,17 @@ class AMP(Core):
     def __init__(self, start=2023, crse_codes=None, **kwargs):
         kwargs['term_code'] = FORECAST_TERM_CODE
         super().__init__(**kwargs)
-        self.crse_codes = union('_headcnt', '_proba', crse_codes)
+        self.crse_codes = union(crse_codes)
         kwargs.pop('date',None)
-        kwargs.pop('term_code')
-        self.terms = {t: Term(
-            date=self.date-pd.Timedelta(days=365*k),
-            term_code=t,
-            is_learner=t<self.term_code,
-            **kwargs) for k, t in enumerate(range(self.term_code, 100*start, -100))}
+        kwargs.pop('term_code',None)
+        self.terms = {t: Term(term_code=t, is_learner=t<self.term_code, date=self.date-pd.Timedelta(days=365*k), **kwargs) for k, t in enumerate(range(self.term_code, 100*start, -100))}
         for k in ['subpops', 'aggregates']:
             self[k] = self.terms[self.term_code][k]
+
+
+    def setup(self):
+        for fcn in [t['get_'+k] for k in ['flagsyear', 'enrollments', 'learners'] for t in self.terms.values()]:
+            fcn()
 
 
     def get_forecasts(self):
@@ -21,23 +22,30 @@ class AMP(Core):
             dct = dict()
             for crse_code in self.crse_codes:
                 for pred_term, pred in self.terms.items():
+                    pred.crse_code = crse_code
                     for modl_term, modl in self.terms.items():
                         if modl.is_learner:
-                            pred.crse_code = crse_code
-                            modl.crse_code = crse_code
                             Z = pred.get_predictions(modl).assign(crse_code=crse_code).join(modl.get_enrollments()['crse_code'].loc[crse_code]['mlt']).join(pred.current.get_students())
                             Z['prediction'] *= Z.pop('mlt')
                             Z = Z.drop(columns=Z.index.names, errors='ignore')
                             for agg in self.aggregates:
-                                df = Z.groupmy(union('crse_code',self.subpops,agg)).agg({'prediction':'sum', 'cv_score':'max'}).join(pred.get_enrollments()[agg].loc[crse_code]['stable'])
-                                df['error'] = df['prediction'] - df['stable']
-                                df['error_pct'] = df['error'] / df['stable'] * 100
-                                df['prediction_term_code'] = pred_term
-                                df['model_term_code'] = modl_term
+                                df = (Z
+                                    .groupmy(union('crse_code',self.subpops,agg))
+                                    .agg({'prediction':'sum', 'cv_score':'max'})
+                                    .join(pred.get_enrollments()[agg].loc[crse_code]['stable'])
+                                    .assign(
+                                        prediction_term_code=pred_term,
+                                        model_term_code=modl_term,
+                                        error=lambda X: X['prediction'] - X['stable'],
+                                        error_pct=lambda X: X['error'] / X['stable'] * 100,
+                                    ))
+                                if not pred.is_learner:
+                                    df[['stable','error','error_pct']] = pd.NA
                                 dct.setdefault(agg,[]).append(df[['prediction_term_code','model_term_code','prediction','stable','error','error_pct','cv_score']])
             srt = lambda X: X.sort_values(list(X.columns), ascending=['term_code' not in k for k in X.columns])
-            return {agg: srt(pd.concat(L).reset_index().prep()) for agg, L in dct.items()}
-        return self.run(fcn, f'forecasts/{self.date}/{self.term_code}', union([[t.get_enrollments, t.get_learners] for t in self.terms.values()]), suffix='.pkl')[0]
+            with no_warn():
+                return {agg: srt(pd.concat(L).reset_index().prep()) for agg, L in dct.items()}
+        return self.run(fcn, f'forecasts/{self.date}/{self.term_code}', self.setup, suffix='.pkl')[0]
 
 
     def get_reports(self):
@@ -123,7 +131,7 @@ class AMP(Core):
             print(f'creating {dst}', end=': ')
             with codetiming.Timer():
                 src = "./report.xlsx"
-                sheets = {'instructions':instructions} | {agg: fcn(df).round().prep() for agg, df in self.get_forecasts().items()}
+                sheets = {'instructions':instructions} | {agg: fcn(df).query('crse_code!="_proba"').round().prep() for agg, df in self.get_forecasts().items()}
                 with pd.ExcelWriter(src, mode="w", engine="openpyxl") as writer:
                     for sheet_name, df in sheets.items():
                         df.to_excel(writer, sheet_name=sheet_name, index=False)

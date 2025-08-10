@@ -1,7 +1,10 @@
 exec(open('./students.py').read())
+import miceforest as mf
+with no_warn():
+    import flaml as fl
 
 class Term(Core):
-    def __init__(self, is_learner=True, features=dict(), subpops='styp_code', aggregates=None, flaml=dict(), **kwargs):
+    def __init__(self, is_learner=True, features=dict(), subpops='styp_desc', aggregates=None, flaml=dict(), **kwargs):
         super().__init__(**kwargs)
         self.is_learner = is_learner
         self.features = features
@@ -9,9 +12,24 @@ class Term(Core):
         self.aggregates = difference(union('crse_code', aggregates), subpops)
         self.flaml = flaml
         self.current = Students(**kwargs)
-        kwargs.pop('date',None)
-        self.stable = Students(date=self.stable_date, **kwargs)
+        kwargs['date'] = self.stable_date
+        self.stable = Students(**kwargs)
         self.crse_code = '_headcnt'
+
+
+    def get_enrollments(self):
+        def fcn():
+            def fcn1(agg):
+                grp = union('crse_code', self.subpops, agg)
+                g = lambda X, Y: get_incoming(X).join(Y, rsuffix='_drop').groupmy(grp)['count'].sum()  # get stuff from Y that is not in X
+                df = pd.DataFrame({
+                    'current':g(self.current.get_students(), self.stable.get_registrations()),  # join stable course registrations onto current list of students
+                    'stable' :g(self.stable.get_registrations(), self.stable.get_students()),  # join extra student info onto stable list of registrations
+                    }).fillna(0)
+                df['mlt'] = df['stable'] / df['current']
+                return df.sort_index()
+            return {agg: fcn1(agg) for agg in self.aggregates}
+        return self.run(fcn, f'enrollments/{self.date}/{self.term_code}', [self.current.get_students, self.stable.get_students, self.stable.get_registrations], suffix='.pkl')[0]
 
 
     def get_imputed(self):
@@ -27,32 +45,17 @@ class Term(Core):
 
     def get_prepared(self):
         def fcn(X):
-            g = lambda k, v: self[k].get_registrations().query(f"crse_code==@v")['count'].rename(k if v==self.crse_code else v)
+            g = lambda k, v=self.crse_code: self[k].get_registrations().query(f"crse_code==@v")['count'].rename(k if v==self.crse_code else v)
             Z = (X
                 .join(g('current', '_tot_sch'))
-                .join(g('current', self.crse_code).astype('boolean'))
-                .join(g('stable' , self.crse_code).astype('boolean'))
+                .join(g('current').astype('boolean'))
+                .join(g('stable' ).astype('boolean'))
                 .fillna({'_tot_sch':0, 'current':False, 'stable':False})
             )
             if self.crse_code == '_proba':
                 Z = Z.drop(columns=union(races, 'gender', 'international'), errors='ignore')
             return [Z, Z.pop('stable')]
         return {s: fcn(X) for s, X in self.get_imputed().items()}
-
-
-    def get_enrollments(self):
-        def fcn():
-            def fcn1(agg):
-                grp = union('crse_code', self.subpops, agg)
-                g = lambda X, Y: get_incoming(X).join(Y, rsuffix='_drop').groupmy(grp)['count'].sum()  # get stuff from Y that is not in X
-                df = pd.DataFrame({
-                    'current':g(self.current.get_students(), self.stable.get_registrations()),
-                    'stable' :g(self.stable.get_registrations(), self.stable.get_students()),
-                    }).fillna(0)
-                df['mlt'] = df['stable'] / df['current']
-                return df.sort_index()
-            return {agg: fcn1(agg) for agg in self.aggregates}
-        return self.run(fcn, f'enrollments/{self.date}/{self.term_code}', [self.current.get_students, self.stable.get_students, self.stable.get_registrations], suffix='.pkl')[0]
 
 
     def get_learners(self):
