@@ -13,10 +13,10 @@ class AMP(Core):
 
     def setup(self):
         for fcn in [t['get_'+k] for k in ['flagsyear', 'enrollments', 'imputed', 'learners'] for t in self.terms.values()]:
-            fcn()
+            fcn(read=False)
 
 
-    def get_forecasts(self):
+    def get_forecasts(self, **kwargs):
         def fcn():
             print()
             dct = dict()
@@ -45,7 +45,7 @@ class AMP(Core):
             srt = lambda X: X.sort_values(list(X.columns), ascending=['term_code' not in k for k in X.columns])
             with no_warn():
                 return {agg: srt(pd.concat(L).reset_index().prep()) for agg, L in dct.items()}
-        return self.run(fcn, f'forecasts/{self.date}/{self.term_code}', self.setup, suffix='.pkl')[0]
+        return self.run(fcn, f'forecasts/{self.date}/{self.term_code}', self.setup, suffix='.pkl', **kwargs)[0]
 
 
     def get_reports(self):

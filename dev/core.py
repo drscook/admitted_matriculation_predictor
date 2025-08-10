@@ -47,7 +47,7 @@ class Core(BaseCls):
         return df, exists
 
 
-    def get_terminfo(self, show=False):
+    def get_terminfo(self, show=False, **kwargs):
         def fcn():
             qry = f"""
 select
@@ -70,10 +70,10 @@ where
 """
             df = run_qry(qry, show)
             return df
-        return self.run(fcn, 'terminfo', root=const)[0].set_index('term_code')
+        return self.run(fcn, 'terminfo', root=const, **kwargs)[0].set_index('term_code')
 
 
-    def get_zips(self):
+    def get_zips(self, **kwargs):
         def fcn():
             df = (
                 Nominatim('us')._data  # get all zips
@@ -82,14 +82,14 @@ where
                 .query("state_code.notnull() & state_code not in [None,'mh']")
             )
             return df
-        return self.run(fcn, 'zips', root=const)[0]
+        return self.run(fcn, 'zips', root=const, **kwargs)[0]
 
 
     def get_states(self):
         return union(self.get_zips()['state_code'])
 
 
-    def get_drivetimes(self):
+    def get_drivetimes(self, **kwargs):
         def fcn():
             campus_coords = {
                 's': '-98.215784,32.216217',
@@ -120,7 +120,7 @@ where
                     df = pts.to_frame()[[]]
                     df[k] = np.concatenate(L)
                     return df
-                df = self.run(fcn2, f'drivetimes/{k}', root=const)[0]
+                df = self.run(fcn2, f'drivetimes/{k}', root=const, **kwargs)[0]
                 M.append(df)
             D = pd.concat(M, axis=1).groupmy(level=0).min().stack().reset_index().set_axis(['zip','camp_code','drivetime'], axis=1).prep()
             # There are a few USPS zips without equivalent ZCTA, so we assign them drivetimes for the nearest
@@ -140,7 +140,7 @@ where
             )
             df = pd.concat([D,M], ignore_index=True)
             return df
-        return self.run(fcn, 'drivetimes', self.get_zips, root=const)[0]
+        return self.run(fcn, 'drivetimes', self.get_zips, root=const, **kwargs)[0]
 
 
     def get_spriden(self, show=False):
@@ -165,7 +165,7 @@ where
         return self.spriden
 
 
-    def get_flagsday(self, early_stop=10):
+    def get_flagsday(self, early_stop=10, **kwargs):
         # GA's should not have permissions to run this because it sees pii
         counter = 0
         divide = False
@@ -216,12 +216,12 @@ where
                             if k in df:
                                 df[k] = pd.to_datetime(df[k], errors='coerce')
                     return df
-                if not self.run(fcn, f'flagsday/{current_date}/{term_code}', root=flags_prc, read=False)[1]:
+                if not self.run(fcn, f'flagsday/{current_date}/{term_code}', root=flags_prc, read=False, **kwargs)[1]:
                     counter = 0
                     rm(self.get_dst(f'flagsyear/{term_code//100}', root=flags_prc)[1])
 
 
-    def get_flagsyear(self):
+    def get_flagsyear(self, **kwargs):
         # may hit memory limits running get_flagsyear - just restart kernel and try again
         def fcn():
             with no_warn(FutureWarning):
@@ -231,4 +231,4 @@ where
                     del X
                 return df
                 # return pd.concat([load(src) for src in (flags_prc/'flagsday').rglob(f'**/{self.year}*/*.parquet')], ignore_index=True)
-        return self.run(fcn, f'flagsyear/{self.year}', root=flags_prc)[0]
+        return self.run(fcn, f'flagsyear/{self.year}', root=flags_prc, **kwargs)[0]

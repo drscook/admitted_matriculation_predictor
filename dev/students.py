@@ -24,13 +24,13 @@ class Students(Core):
         super().__init__(**kwargs)
 
 
-    def get_flags(self):
+    def get_flags(self, **kwargs):
         def fcn():
             F = self.get_flagsyear()
             df = F.query(f"current_date<=@self.date").sort_values('current_date').drop_duplicates(subset=['pidm','term_code'], keep='last')
             del F
             return df
-        return self.run(fcn, f'flags/{self.date}/{self.term_code}', self.get_flagsyear, root=raw)[0]
+        return self.run(fcn, f'flags/{self.date}/{self.term_code}', self.get_flagsyear, root=raw, **kwargs)[0]
 
 
     def newest(self, qry, prt, tbl='', sel=''):
@@ -133,7 +133,7 @@ on
         return qry
 
 
-    def get_registrations(self, show=False):
+    def get_registrations(self, show=False, **kwargs):
         def fcn():
             tbl = f'dev.opeir.registration_{self.term_desc}_v'
             if spark.catalog.tableExists(tbl):
@@ -160,10 +160,10 @@ where
                 df = pd.DataFrame(columns=['pidm','levl_code','styp_code','count','crse_code']).set_index('pidm')
             get_duplicates(df, ['pidm','crse_code'])
             return df
-        return self.run(fcn, f'registrations/{self.date}/{self.term_code}', root=raw)[0]
+        return self.run(fcn, f'registrations/{self.date}/{self.term_code}', root=raw, **kwargs)[0]
 
 
-    def get_admissions(self, show=False):
+    def get_admissions(self, show=False, **kwargs):
         def fcn():
             def fcn1(season):
                 tbl = f'dev.opeir.admissions_{season}{self.year}_v'
@@ -196,10 +196,10 @@ where
                 .drop_duplicates(subset='pidm', keep='last') #for each pidm, keeps a levl_code!='ug' row (if any) otherwise highest levl_code='ug' appl_no ... we will remove non-ug rows below
             )
             return get_incoming(df)
-        return self.run(fcn, f'admissions/{self.date}/{self.term_code}', root=raw)[0]
+        return self.run(fcn, f'admissions/{self.date}/{self.term_code}', root=raw, **kwargs)[0]
 
 
-    def get_students(self):
+    def get_students(self, **kwargs):
         def fcn():
             df = (
                 self.get_admissions()
@@ -237,4 +237,4 @@ where
             for k in ['waiver_desc','fafsa_app','ssb_last_accessed','finaid_accepted','schlship_app']:
                 df[k.split('_')[0]] = df[k].notnull()
             return df.drop(columns=df.filter(like='_drop'))
-        return self.run(fcn, f'students/{self.date}/{self.term_code}', [self.get_drivetimes, self.get_flags, self.get_admissions], root=raw)[0]
+        return self.run(fcn, f'students/{self.date}/{self.term_code}', [self.get_drivetimes, self.get_flags, self.get_admissions], root=raw, **kwargs)[0]
