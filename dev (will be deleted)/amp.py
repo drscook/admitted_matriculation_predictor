@@ -25,19 +25,21 @@ class AMP(Core):
                     pred.crse_code = crse_code
                     for modl_term, modl in self.terms.items():
                         if modl.is_learner:
-                            Z = pred.get_predictions(modl).assign(crse_code=crse_code).join(modl.get_enrollments()['crse_code'].loc[crse_code]['mlt']).join(pred.current.get_students())
+                            Z = pred.get_predictions(modl).assign(crse_code=crse_code).join(modl.get_enrollments()['crse_code'].loc['_headcnt']['mlt']).join(pred.current.get_students())
                             Z['prediction'] *= Z.pop('mlt')
                             Z = Z.drop(columns=Z.index.names, errors='ignore')
                             for agg in self.aggregates:
                                 df = (Z
                                     .groupmy(union('crse_code',self.subpops,agg))
                                     .agg({'prediction':'sum', 'cv_score':'max'})
-                                    .join(pred.get_enrollments()[agg].loc[crse_code]['stable'])
+                                    # .join(pred.get_enrollments()[agg].loc[crse_code]['stable'])
+                                    .join(pred.get_enrollments()[agg]['stable'])
+                                    .fillna(0)
                                     .assign(
                                         prediction_term_code=pred_term,
                                         model_term_code=modl_term,
                                         error=lambda X: X['prediction'] - X['stable'],
-                                        error_pct=lambda X: X['error'] / X['stable'] * 100,
+                                        error_pct=lambda X: X['error'] / X['stable'].replace(0, pd.NA) * 100,
                                     ))
                                 if not pred.is_learner:
                                     df[['stable','error','error_pct']] = pd.NA
