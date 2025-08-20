@@ -29,6 +29,8 @@ class Term(Core):
 
     def get_enrollments(self, **kwargs):
         nm = sys._getframe().f_code.co_name[4:]
+        if not self.is_learner:
+            return None
         def fcn():
             def fcn1(agg):
                 grp = union('crse_code', self.subpops, agg, 'term_desc')

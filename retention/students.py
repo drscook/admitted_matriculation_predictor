@@ -148,7 +148,7 @@ on
 where
     credit_hr > 0
     and subj_code <> 'INST'""")
-                A = run_qry(qry, show).sort()
+                A = run_qry(qry, show=show).sort()
                 B = A.drop(columns=['count','crse_code']).groupmy('pidm').last()  #non-crse student info
                 C = A.groupmy(['pidm','crse_code'])[['count']].sum().reset_index('crse_code') #combine if enrolled in >1 crn for same crse_code (rare)
                 D = C.groupmy('pidm')[['count']].sum() #compute total sch
@@ -194,7 +194,7 @@ where
     stvapdc_inst_acc_ind is not null  --only accepted""")
             #some incoming fall students decide to take classes during the preceeding summer and therefore may show up as summer applicants
             #we need to capture them, so we pull both summer & fall admission then uniquify later
-            L = [run_qry(fcn1(season), show) for season in ['summer','fall']]
+            L = [run_qry(fcn1(season), show=show) for season in ['summer','fall']]
             #some pidms have multiple applications with different levl_code
             #goal: exclude a pidm if it has ANY application where levl_coee!='ug' (even if it also has one with levl_code=='ug'), then keep the highest appl_no for each pidm
             df = (

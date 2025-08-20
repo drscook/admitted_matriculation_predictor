@@ -49,7 +49,7 @@ class AMP(Core):
         nm = sys._getframe().f_code.co_name[4:]
         def fcn():
             print()
-            return {k: pd.concat([t.get_enrollments()[k] for t in self.terms.values()]) for k in self.aggregates}
+            return {k: pd.concat([t.get_enrollments()[k] for t in self.terms.values() if t.is_learner]) for k in self.aggregates}
         return self.run(fcn, f'{nm}/{self.date}', suffix='.pkl', **kwargs)
 
 
