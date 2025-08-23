@@ -1,7 +1,5 @@
 exec(open('./students.py').read())
-import miceforest as mf
-with no_warn():
-    import flaml as fl
+import miceforest as mf, flaml as fl
 from sklearn.metrics import log_loss
 
 def custom_log_loss(X_val, y_val, estimator, labels, X_train, y_train, *args, **kwargs):
@@ -23,7 +21,8 @@ class Term(Core):
         self.current = Students(**kwargs)
         kwargs.pop('date',None)
         self.stable  = Students(**kwargs)
-        offset = {1:7, 8:93}
+        #apply LAG to term_code
+        offset = {1:7, 8:93} #yyyy01->yyyy08 (+7); yyyy08->(yyyy+1)01 (+100-7=+93)
         for _ in range(LAG):
             kwargs['term_code'] += offset[kwargs['term_code']%10]
         self.actual  = Students(**kwargs)
@@ -38,14 +37,10 @@ class Term(Core):
                 grp = union('crse_code', self.subpops, agg, 'term_desc')
                 g = lambda X, Y: get_incoming(X.join(Y, rsuffix='_drop')).groupmy(grp)['count'].sum()  # get stuff from Y that is not in X
                 df = pd.DataFrame({
-                    'current':g(self.current.get_students(), self.actual.get_registrations()),  # join actual course registrations onto current list of students
-                    'actual' :g(self.actual.get_registrations(), self.stable.get_students()),  # join student info on stable date
+                    'current':g(self.current.get_students(), self.actual.get_registrations()),  # join actual course registrations onto current student info
+                    'actual' :g(self.actual.get_registrations(), self.stable.get_students()),  # join stable student info onto actual course registrations
                     }).fillna(0)
-                try:
-                    df['mlt'] = df['actual'] / df['current']
-                except Exception as e:
-                    print(agg, e)
-                    df.disp()
+                df['mlt'] = df['actual'] / df['current']
                 return df.sort_index()
             return {agg: fcn1(agg) for agg in self.aggregates}
         return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', [self.current.get_students, self.stable.get_students, self.actual.get_registrations], suffix='.pkl', **kwargs)[0]
@@ -66,7 +61,7 @@ class Term(Core):
         return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', self.current.get_students, suffix='.pkl', **kwargs)[0]
 
 
-    def get_prepared(self):
+    def get_prepared(self, **kwargs):
         def fcn(X):
             Z = (X
                 .join(self.current.reg(self.crse_code).rename('current'))

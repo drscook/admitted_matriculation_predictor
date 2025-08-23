@@ -29,7 +29,6 @@ class Students(Core):
         nm = sys._getframe().f_code.co_name[4:]
         def fcn():
             df = self.get_flagsyear().query(f"current_date<=@self.date").sort_values(['current_date','app_date']).drop_duplicates(subset='pidm', keep='last')
-            # df = self.get_flagsyear().query(f"current_date<=@self.date").sort_values('current_date').drop_duplicates(subset=['pidm','term_code'], keep='last')
             del self['flagsyear']
             return df
         return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', self.get_flagsyear, root=raw, **kwargs)[0].set_index('pidm')
@@ -161,8 +160,6 @@ where
                 # df = B.join(F).reset_index()
             else:
                 # placeholder if table DNE
-                # raise Exception(tbl, 'is missing')
-                # df = pd.DataFrame(columns=union('pidm','term_desc','levl_code','styp_code',self.subpops,self.features.keys(),'count','crse_code'))
                 df = pd.DataFrame(columns=['pidm','crse_code','count'])
             get_duplicates(df, ['pidm','crse_code'])
             return df
@@ -250,4 +247,4 @@ where
             for k in ['waiver_desc','fafsa_app','ssb_last_accessed','finaid_accepted','schlship_app']:
                 df[k.split('_')[0]] = df[k].notnull()
             return df.drop(columns=df.filter(like='_drop'))
-        return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', [self.get_drivetimes, self.get_flags, self.get_admissions], root=raw, **kwargs)[0].set_index('pidm')
+        return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', [self.get_drivetimes, self.get_flags, self.get_admissions, self.get_registrations], root=raw, **kwargs)[0].set_index('pidm')

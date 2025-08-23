@@ -1,5 +1,5 @@
 import  os, sys, pathlib, shutil, pickle, warnings, contextlib, requests, copy, functools, time, dataclasses
-import numpy as np, pandas as pd, pyarrow.parquet as pq, matplotlib.pyplot as plt, seaborn as sns
+import numpy as np, pandas as pd, geopandas as gpd, pyarrow.parquet as pq, matplotlib.pyplot as plt, seaborn as sns
 from IPython.display import clear_output, display
 from sklearn import set_config
 set_config(transform_output="pandas")
@@ -72,11 +72,7 @@ def listify(*args, reverse=None):
         L = list(*args)
     except Exception as e:
         L = list(args)
-    try:
-        L = sorted(L, reverse=reverse) 
-    except Exception as e:
-        pass
-    return L
+    return L if reverse is None else sorted(L, reverse=reverse) 
 
 def setify(*args):
     """ensure it is a set"""
@@ -301,12 +297,11 @@ def dump(path, obj, **kwargs):
     return obj
 
 #read_parquet reverts index to pre-nullable dtypes
-#to fix this bug without doing unnecessary work on colums, we prep index only
+#to fix this bug without doing unnecessary work on columns, we assume we created the file and therefore prep index only by default
 def load(path, idx=True, col=False, **kwargs):
     p = pathify(path)
     if p.suffix == '.parquet':
         if any(k.type=='binary' for k in pq.ParquetFile(p).schema_arrow):
-            import geopandas as gpd
             obj = gpd.read_parquet(p, **kwargs)
         else:
             obj =  pd.read_parquet(p, **kwargs)
