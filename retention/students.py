@@ -22,6 +22,7 @@ def get_duplicates(df, subset='pidm', n_rows=10, errors='raise'):
 class Students(Core):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.reg = lambda c='_tot_sch' : self.get_registrations().query(f"crse_code==@c")['count'].rename(c).astype('boolean' if c!='_tot_sch' else None).prep()
 
 
     def get_flags(self, **kwargs):
@@ -31,7 +32,7 @@ class Students(Core):
             # df = self.get_flagsyear().query(f"current_date<=@self.date").sort_values('current_date').drop_duplicates(subset=['pidm','term_code'], keep='last')
             del self['flagsyear']
             return df
-        return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', self.get_flagsyear, root=raw, **kwargs)[0]
+        return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', self.get_flagsyear, root=raw, **kwargs)[0].set_index('pidm')
 
 
     def newest(self, qry, prt, tbl='', sel=''):
@@ -149,19 +150,20 @@ where
     credit_hr > 0
     and subj_code <> 'INST'""")
                 A = run_qry(qry, show=show).sort()
-                B = A.drop(columns=['count','crse_code']).groupmy('pidm').last()  #non-crse student info
+                # B = A.drop(columns=['count','crse_code']).groupmy('pidm').last()  #non-crse student info
                 C = A.groupmy(['pidm','crse_code'])[['count']].sum().reset_index('crse_code') #combine if enrolled in >1 crn for same crse_code (rare)
                 D = C.groupmy('pidm')[['count']].sum() #compute total sch
                 E = D.copy()
                 C['count'] = 1 #crse_code headcount
                 E['count'] = 1 #overall headcount
-                F = pd.concat([C, D.assign(crse_code='_tot_sch'), E.assign(crse_code='_headcnt'), E.assign(crse_code='_proba')])
-                df = B.join(F).reset_index()
+                df = pd.concat([C, D.assign(crse_code='_tot_sch'), E.assign(crse_code='_headcnt'), E.assign(crse_code='_proba')]).reset_index()
+                # F = pd.concat([C, D.assign(crse_code='_tot_sch'), E.assign(crse_code='_headcnt'), E.assign(crse_code='_proba')])
+                # df = B.join(F).reset_index()
             else:
                 # placeholder if table DNE
                 # raise Exception(tbl, 'is missing')
                 # df = pd.DataFrame(columns=union('pidm','term_desc','levl_code','styp_code',self.subpops,self.features.keys(),'count','crse_code'))
-                df = pd.DataFrame(columns=['pidm','levl_code','styp_code','count','crse_code'])
+                df = pd.DataFrame(columns=['pidm','crse_code','count'])
             get_duplicates(df, ['pidm','crse_code'])
             return df
         return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', root=raw, **kwargs)[0].set_index('pidm')
@@ -203,7 +205,7 @@ where
                 .drop_duplicates(subset='pidm', keep='last') #for each pidm, keeps a levl_code!='ug' row (if any) otherwise highest levl_code='ug' appl_no ... we will remove non-ug rows below
             )
             return get_incoming(df)
-        return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', root=raw, **kwargs)[0]
+        return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', root=raw, **kwargs)[0].set_index('pidm')
 
 
     def get_students(self, **kwargs):
@@ -211,8 +213,9 @@ where
         def fcn():
             df = (
                 self.get_admissions()
-                # .merge(self.get_flags(), on=['pidm','term_code'], how='left', suffixes=['', '_drop'])
-                .merge(self.get_flags(), on='pidm', how='left', suffixes=['', '_drop'])
+                .join(self.get_flags(), how='left', rsuffix='_drop')
+                .join(self.reg('_tot_sch'), how='left', rsuffix='_drop')
+                .reset_index()
                 .merge(self.get_drivetimes(), on=['zip','camp_code'], how='left', suffixes=['', '_drop'])
                 .prep()
             )

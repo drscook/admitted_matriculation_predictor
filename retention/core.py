@@ -20,9 +20,9 @@ class Core(BaseCls):
         self.year = self.term_code // 100
         self.term_desc, self.census_date = self.get_terminfo().loc[self.term_code,['term_desc','census_date']]
         self.term_desc = self.term_desc[:-4] + ' ' + self.term_desc[-4:]
-        self.date = dt_clip(date, weekday=2).date()
         self.stable_date = dt_clip(self.census_date + pd.to_timedelta(14,'D'), weekday=2).date()
-        self.day = (self.stable_date - self.date).days
+        self.date = dt_clip(date, weekday=2, upper=min(self.stable_date, now.date())).date()
+        # self.day = (self.stable_date - self.date).days
 
 
     def get_dst(self, path, suffix='.parquet', **kwargs):
@@ -73,7 +73,7 @@ where
 """
             df = run_qry(qry, show)
             return df
-        return self.run(fcn, nm, root=const, **kwargs)[0].set_index('term_code')
+        return self.run(fcn, nm, root=const, **kwargs)[0].set_index('term_code').sort_index()
 
 
     def get_zips(self, **kwargs):

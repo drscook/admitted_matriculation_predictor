@@ -21,10 +21,12 @@ class Term(Core):
         self.flaml = flaml
         self.crse_code = '_headcnt'
         self.current = Students(**kwargs)
-        if LAG == 1:
-            kwargs['term_code'] = (self.year+1)*100+1
+        kwargs.pop('date',None)
         self.stable  = Students(**kwargs)
-        self.stable.date = self.stable.stable_date
+        offset = {1:7, 8:93}
+        for _ in range(LAG):
+            kwargs['term_code'] += offset[kwargs['term_code']%10]
+        self.actual  = Students(**kwargs)
 
 
     def get_enrollments(self, **kwargs):
@@ -34,45 +36,46 @@ class Term(Core):
         def fcn():
             def fcn1(agg):
                 grp = union('crse_code', self.subpops, agg, 'term_desc')
-                g = lambda X, Y: get_incoming(X).join(Y, rsuffix='_drop').groupmy(grp)['count'].sum()  # get stuff from Y that is not in X
+                g = lambda X, Y: get_incoming(X.join(Y, rsuffix='_drop')).groupmy(grp)['count'].sum()  # get stuff from Y that is not in X
                 df = pd.DataFrame({
-                    'current':g(self.current.get_students(), self.stable.get_registrations()),  # join stable course registrations onto current list of students
-                    'stable' :g(self.stable.get_registrations(), self.stable.get_students()),  # join extra student info onto stable list of registrations
+                    'current':g(self.current.get_students(), self.actual.get_registrations()),  # join actual course registrations onto current list of students
+                    'actual' :g(self.actual.get_registrations(), self.stable.get_students()),  # join student info on stable date
                     }).fillna(0)
                 try:
-                    df['mlt'] = df['stable'] / df['current']
+                    df['mlt'] = df['actual'] / df['current']
                 except Exception as e:
                     print(agg, e)
                     df.disp()
                 return df.sort_index()
             return {agg: fcn1(agg) for agg in self.aggregates}
-        return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', [self.current.get_students, self.stable.get_students, self.stable.get_registrations], suffix='.pkl', **kwargs)[0]
+        return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', [self.current.get_students, self.stable.get_students, self.actual.get_registrations], suffix='.pkl', **kwargs)[0]
 
 
     def get_imputed(self, **kwargs):
         nm = sys._getframe().f_code.co_name[4:]
         def fcn():
             def fcn1(df):
-                X = df.fillna(self.features)[self.features.keys()].prep(category=True)
+                X = df[self.features.keys()].prep(category=True)
                 imp = mf.ImputationKernel(X.reset_index(drop=True), random_state=self.seed)
                 imp.mice(10)
                 return imp.complete_data().set_index(X.index)
-            return {s: fcn1(df) for s, df in self.current.get_students().groupmy(self.subpops)}
+            return {s: fcn1(df) for s, df in self.current.get_students().fillna(self.features).groupmy(self.subpops)}
+            # Z = self.current.get_students().fillna(self.features)
+            # Z = Z.query('_tot_sch > 0') if LAG > 0 else Z
+            # return {s: fcn1(df) for s, df in Z.groupmy(self.subpops)}
         return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', self.current.get_students, suffix='.pkl', **kwargs)[0]
 
 
     def get_prepared(self):
         def fcn(X):
-            g = lambda k, v=self.crse_code: self[k].get_registrations().query(f"crse_code==@v")['count'].rename(k if v==self.crse_code else v)
             Z = (X
-                .join(g('current', '_tot_sch'))
-                .join(g('current').astype('boolean'))
-                .join(g('stable' ).astype('boolean'))
-                .fillna({'_tot_sch':0, 'current':False, 'stable':False})
+                .join(self.current.reg(self.crse_code).rename('current'))
+                .join(self.actual .reg(self.crse_code).rename('actual'))
+                .fillna({'current':False, 'actual':False})
             )
             if self.crse_code == '_proba':
                 Z = Z.drop(columns=union(races, 'gender', 'international'), errors='ignore')
-            return [Z, Z.pop('stable')]
+            return [Z, Z.pop('actual')]
         return {s: fcn(X) for s, X in self.get_imputed().items()}
 
 
@@ -102,7 +105,7 @@ class Term(Core):
                 learner.fit(*Z, **dct)
                 return learner
             return {s: fcn1(s, Z) for s, Z in self.get_prepared().items()}
-        lrn = self.run(fcn, f'{nm}/{self.date}/{self.term_code}/{self.crse_code}', [self.get_imputed, self.current.get_registrations, self.stable.get_registrations], suffix='.pkl', **kwargs)[0]
+        lrn = self.run(fcn, f'{nm}/{self.date}/{self.term_code}/{self.crse_code}', [self.get_imputed, self.current.get_registrations, self.actual.get_registrations], suffix='.pkl', **kwargs)[0]
         del self[nm]
         return lrn
 
@@ -114,7 +117,7 @@ class Term(Core):
         def fcn():
             data = self.get_prepared()
             learners = modl.get_learners()
-            dct = {s: pd.DataFrame({'prediction': l.predict_proba(data[s][0]).T[1], 'stable':data[s][1], 'cv_score': 100*l.best_loss}) for s, l in learners.items()}
+            dct = {s: pd.DataFrame({'prediction': l.predict_proba(data[s][0]).T[1], 'actual':data[s][1], 'cv_score': 100*l.best_loss}) for s, l in learners.items()}
             return pd.concat(dct, names=self.subpops).reset_index()
         df = self.run(fcn, f'{nm}/{self.date}/{self.term_code}/{self.crse_code}/{modl.term_code}', [self.get_prepared, self.get_enrollments, modl.get_learners], **kwargs)[0]
         del self[nm]

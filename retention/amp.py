@@ -7,6 +7,7 @@ class AMP(Core):
         kwargs.pop('date',None)
         kwargs.pop('term_code',None)
         self.terms = {t: Term(term_code=t, is_learner=t<self.term_code, date=self.date-pd.Timedelta(days=365*k), **kwargs) for k, t in enumerate(range(self.term_code, 100*start, -100))}
+        self.srt = lambda df: df.sort_values(list(df.columns), ascending=['term' not in k for k in df.columns])
         for k in ['subpops', 'aggregates']:
             self[k] = self.terms[self.term_code][k]
 
@@ -15,7 +16,7 @@ class AMP(Core):
         for fcn in [t['get_'+k] for k in ['flagsyear','imputed'] for t in self.terms.values()]:
             fcn(read=False)
         self.get_enrollmentsall()
-        self.subqry = f"""from parquet.`{self.get_predictionsall(read=False)[1]}` as A left join parquet.`{self.get_studentsall(read=False)[1]}` as B using ({join(union('pidm', self.subpops, 'prediction_term'))})"""
+        self.subqry = f"""from parquet.`{self.get_predictionsall(read=False)[1]}` as A left join parquet.`{self.get_studentsall(read=False)[1]}` as B using ({join(union('pidm', self.subpops, 'cohort_term'))})"""
         return self
 
 
@@ -24,7 +25,7 @@ class AMP(Core):
         def fcn():
             print()
             with no_warn():
-                return pd.concat([t.current.get_students() for t in self.terms.values()]).rename(columns={'term_desc':'prediction_term'}).reset_index()
+                return pd.concat([t.current.get_students() for t in self.terms.values()]).rename(columns={'term_desc':'cohort_term'}).reset_index()
         return self.run(fcn, f'{nm}/{self.date}', **kwargs)
 
 
@@ -32,16 +33,17 @@ class AMP(Core):
             nm = sys._getframe().f_code.co_name[4:]
             def fcn():
                 print()
-                Z = pd.concat([pred.set('crse_code', crse_code).get_predictions(modl).assign(crse_code=crse_code, prediction_term=pred.term_desc, model_term=modl.term_desc) for crse_code in self.crse_codes for pred in self.terms.values() for modl in self.terms.values() if modl.is_learner]).reset_index(drop=True)
+                Z = pd.concat([pred.set('crse_code', crse_code).get_predictions(modl).assign(crse_code=crse_code, prediction_term=pred.actual.term_desc, cohort_term=pred.current.term_desc, model_term=modl.current.term_desc) for crse_code in self.crse_codes for pred in self.terms.values() for modl in self.terms.values() if modl.is_learner]).reset_index(drop=True)
                 E = self.get_enrollmentsall()['crse_code'].loc['_headcnt']['mlt'].rename_axis(index={'term_desc':'model_term'}).reset_index()
                 return Z.merge(E, how='left')
-            return self.run(fcn, f'{nm}/{self.date}', **kwargs)
+            return self.run(fcn, f'{nm}/{self.date}', self.get_enrollmentsall, **kwargs)
 
 
     def get_proba(self, **kwargs):
         nm = sys._getframe().f_code.co_name[4:]
         def fcn():
-            return run_qry(f"select * except (crse_code, cv_score, mlt) {self.subqry} where crse_code='_proba'").move('model_term', 'prediction_term').sort_values(['prediction', 'pidm'], ascending=False)
+            df = run_qry(f"select * except (crse_code, cv_score, mlt) {self.subqry} where crse_code='_proba'")
+            return self.srt(df.move('prediction_term', 'cohort_term').move('model_term', 'cohort_term', 1))
         return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', self.setup, **kwargs)[0]
     
     
@@ -50,32 +52,32 @@ class AMP(Core):
         def fcn():
             print()
             return {k: pd.concat([t.get_enrollments()[k] for t in self.terms.values() if t.is_learner]) for k in self.aggregates}
-        return self.run(fcn, f'{nm}/{self.date}', suffix='.pkl', **kwargs)
+        return self.run(fcn, f'{nm}/{self.date}', suffix='.pkl', **kwargs)[0]
 
 
     def get_forecasts(self, **kwargs):
         nm = sys._getframe().f_code.co_name[4:]
         def fcn():
             def fcn1(agg):
-                group = join(union('crse_code', self.subpops, agg, 'prediction_term', 'model_term'))
+                group = join(union('crse_code', self.subpops, agg, 'prediction_term', 'cohort_term', 'model_term'))
                 qry = f"select {group}, sum(prediction*mlt) as prediction, max(cv_score) as cv_score {self.subqry} where crse_code<>'_proba' group by {group}"
-                df = run_qry(qry).merge(self.get_enrollmentsall()[0][agg]['stable'].rename_axis(index={'term_desc':'prediction_term'}).reset_index(), how='left').fillna(0)
-                df['error'] = df['prediction'] - df['stable']
-                df['error_pct'] = df['error'] / df['stable'].replace(0, pd.NA) * 100
+                df = run_qry(qry).merge(self.get_enrollmentsall()[agg]['actual'].rename_axis(index={'term_desc':'prediction_term'}).reset_index(), how='left').fillna(0)
+                df['error'] = df['prediction'] - df['actual']
+                df['error_pct'] = df['error'] / df['actual'].replace(0, pd.NA) * 100
                 df['cv_score'] = df.pop('cv_score')
-                df.loc[df.eval('prediction_term == @self.term_desc'), ['stable', 'error', 'error_pct']] = pd.NA
-                return df.sort_values(list(df.columns), ascending=['term' not in k for k in df.columns])
+                df.loc[df.eval('prediction_term == @self.term_desc'), ['actual', 'error', 'error_pct']] = pd.NA
+                return self.srt(df)
             return {agg: fcn1(agg) for agg in self.aggregates}
         return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', self.setup,  suffix='.pkl', **kwargs)[0]
 
 
     def get_reports(self):
         rpts = {
-            'summary':lambda df: df.query(f"prediction_term==@self.term_desc").loc[:,:'prediction'],
+            'summary':lambda df: df.query(f"prediction_term==prediction_term.max() & model_term==model_term.max()").loc[:,:'prediction'],
             'details':lambda df: df,
         }
         rpts = {rpt: {agg: fcn(df).round().prep() for agg, df in self.get_forecasts().items()} for rpt, fcn in rpts.items()}
-        rpts['em'] = {join(s): df for s, df in self.get_spriden().merge(self.get_proba().query(f"prediction_term==@self.term_desc & model_term==model_term.max()"), how='right').groupmy(self.subpops)}
+        rpts['students'] = {join(s): df for s, df in self.get_spriden().merge(self.get_proba().query(f"prediction_term==prediction_term.max() & model_term==model_term.max()"), how='right').groupmy(self.subpops)}
 
         instructions = pd.DataFrame({f"Admitted Matriculation Projections (AMP) for {self.date}":[
             f'''Executive Summary''',
@@ -95,8 +97,9 @@ class AMP(Core):
             f'''Definitions''',
             f'''crse_code = course code (_headcnt = total headcount)''',
             f'''styp_desc = student type; returning = re-enrolling after a previous attempt (not continuing)''',
-            f'''prediction_term_code = cohort being forecast''',
-            f'''model_term_code = cohort used to train AMP''',
+            f'''prediction_term = term being forecast''',
+            f'''cohort_term = cohort being forecast''',
+            f'''model_term = cohort used to train AMP''',
             f'''prediction = forecast headcount''',
             f'''*actual = true headcount''',
             f'''*error = prediction - actual''',

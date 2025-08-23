@@ -1,5 +1,5 @@
 import  os, sys, pathlib, shutil, pickle, warnings, contextlib, requests, copy, functools, time, dataclasses
-import numpy as np, pandas as pd, pyarrow.parquet as pq, matplotlib.pyplot as plt
+import numpy as np, pandas as pd, pyarrow.parquet as pq, matplotlib.pyplot as plt, seaborn as sns
 from IPython.display import clear_output, display
 from sklearn import set_config
 set_config(transform_output="pandas")
@@ -150,9 +150,11 @@ def sort(X, by=None, **kwargs):
     return wrap2(fcn, X)
 setmeth_pd(sort)
 
-def move(X, src, dst, offset=1):
+def move(X, src, dst, offset=0):
     def fcn(df):
-        df.insert(df.columns.get_loc(dst)+offset, src, df.pop(src))
+        val = df.pop(src)
+        loc = max(df.columns.get_loc(dst)+offset, 0)
+        df.insert(loc, src, val)
         return df
     return wrap2(fcn, X)
 setmeth_pd(move)
@@ -217,7 +219,7 @@ def prepr(X, **kwargs):
     else:
         return X
     
-def dt_clip(X=now, weekday=None, lower=None, upper=now):
+def dt_clip(X, weekday=None, lower=None, upper=None):
     def fcn(ser):
         s = pd.Series(pd.to_datetime(ser))
         l = pd.to_datetime(lower)
