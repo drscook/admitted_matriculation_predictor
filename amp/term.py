@@ -1,6 +1,7 @@
 exec(open('./students.py').read())
 import miceforest as mf, flaml as fl
 from sklearn.metrics import log_loss
+from sklearn.model_selection import cross_val_predict
 
 def custom_log_loss(X_val, y_val, estimator, labels, X_train, y_train, *args, **kwargs):
     """Flaml's log_loss errs when only 1 value appears in a split, so we create custom_log_loss to specify labels: https://microsoft.github.io/FLAML/docs/Use-Cases/Task-Oriented-AutoML/"""
@@ -112,7 +113,10 @@ class Term(Core):
         def fcn():
             data = self.get_prepared()
             learners = modl.get_learners()
-            dct = {s: pd.DataFrame({'prediction': l.predict_proba(data[s][0]).T[1], 'actual':data[s][1], 'cv_score': 100*l.best_loss}) for s, l in learners.items()}
+            dct = {s: pd.DataFrame({
+                'prediction': (learners[s].predict_proba(X) if self.term_desc != modl.term_desc else cross_val_predict(learners[s].model, X, y, cv=min(3, y.sum()), method='predict_proba')).T[1],
+                'actual':y, 'cv_score': 100*learners[s].best_loss}) for s, (X, y) in data.items()}
+            # dct = {s: pd.DataFrame({'prediction': l.predict_proba(data[s][0]).T[1], 'actual':data[s][1], 'cv_score': 100*l.best_loss}) for s, l in learners.items()}
             return pd.concat(dct, names=self.subpops).reset_index()
         df = self.run(fcn, f'{nm}/{self.date}/{self.term_code}/{self.crse_code}/{modl.term_code}', [self.get_prepared, self.get_enrollments, modl.get_learners], **kwargs)[0]
         del self[nm]

@@ -1,57 +1,86 @@
 exec(open('./term.py').read())
 class AMP(Core):
-    def __init__(self, start=2023, crse_codes=None, **kwargs):
+    def __init__(self, start=2022, crse_codes=['_headcnt','_proba'], **kwargs):
         kwargs['term_code'] = FORECAST_TERM_CODE
         super().__init__(**kwargs)
         self.crse_codes = union(crse_codes)
         kwargs.pop('date',None)
         kwargs.pop('term_code',None)
         self.terms = {t: Term(term_code=t, is_learner=t<self.term_code, date=self.date-pd.Timedelta(days=365*k), **kwargs) for k, t in enumerate(range(self.term_code, 100*start, -100))}
+        self.srt = lambda df: df.sort_values(list(df.columns), ascending=['term' not in k for k in df.columns])
+        self.subqry = lambda: f"""from parquet.`{self.get_predictionsall(read=False)[1]}` as A left join parquet.`{self.get_studentsall(read=False)[1]}` as B using ({join(union('pidm', self.subpops, 'cohort_term'))})"""
         for k in ['subpops', 'aggregates']:
             self[k] = self.terms[self.term_code][k]
 
 
-    def setup(self):
-        for fcn in [t['get_'+k] for k in ['flagsyear', 'enrollments', 'imputed', 'learners'] for t in self.terms.values()]:
-            fcn(read=False)
+    def get_studentsall(self, **kwargs):
+        nm = sys._getframe().f_code.co_name[4:]
+        F = lambda: [t.current.get_students() for t in self.terms.values()]
+        def fcn():
+            with no_warn():
+                return pd.concat(F()).reset_index().rename(columns={'term_desc':'cohort_term'})
+        return self.run(fcn, f'{nm}/{self.date}', F, **kwargs)
+
+
+    def get_enrollmentsall(self, **kwargs):
+        nm = sys._getframe().f_code.co_name[4:]
+        F = lambda: [t.get_enrollments() for t in self.terms.values() if t.is_learner]
+        def fcn():
+            G = F()
+            return {agg: pd.concat([g[agg] for g in G]) for agg in self.aggregates}
+        return self.run(fcn, f'{nm}/{self.date}', [self.get_studentsall, F], suffix='.pkl', **kwargs)[0]
+    
+    
+    def get_predictionsall(self, **kwargs):
+        nm = sys._getframe().f_code.co_name[4:]
+        F = lambda: [pred.set('crse_code', crse).get_predictions(modl).assign(crse_code=crse, prediction_term=pred.actual.term_desc, cohort_term=pred.current.term_desc, model_term=modl.current.term_desc) for crse in self.crse_codes for pred in self.terms.values() for modl in self.terms.values() if modl.is_learner]
+        def fcn():
+            df = pd.concat(F()).reset_index(drop=True)
+            E = self.get_enrollmentsall()['crse_code'].loc['_headcnt']['mlt'].rename_axis(index={'term_desc':'model_term'}).reset_index()
+            return df.merge(E, how='left')
+        return self.run(fcn, f'{nm}/{self.date}', [self.get_enrollmentsall, F], **kwargs)
+
+
+    def get_proba(self, **kwargs):
+        nm = sys._getframe().f_code.co_name[4:]
+        def fcn():
+            df = run_qry(f"select * except (crse_code, cv_score, mlt) {self.subqry()} where crse_code='_proba'").move('prediction_term', 'cohort_term').move('model_term', 'cohort_term', 1).move('_tot_sch', 'actual', 1)
+            df.loc[df.eval('cohort_term == @self.term_desc'), 'actual'] = pd.NA
+            df['srt'] = df.groupmy(['cohort_term', 'pidm'])['prediction'].transform('mean')
+            df = df.sort_values('srt')
+            df['srt'] = df.groupmy(['cohort_term', 'pidm']).ngroup()
+            return df.sort_values(['cohort_term', 'srt', 'model_term'], ascending=False).drop(columns='srt')
+        return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', self.get_predictionsall, **kwargs)[0]
 
 
     def get_forecasts(self, **kwargs):
+        nm = sys._getframe().f_code.co_name[4:]
         def fcn():
-            print()
-            dct = dict()
-            for crse_code in self.crse_codes:
-                for pred_term, pred in self.terms.items():
-                    pred.crse_code = crse_code
-                    for modl_term, modl in self.terms.items():
-                        if modl.is_learner:
-                            Z = pred.get_predictions(modl).assign(crse_code=crse_code).join(modl.get_enrollments()['crse_code'].loc['_headcnt']['mlt']).join(pred.current.get_students())
-                            Z['prediction'] *= Z.pop('mlt')
-                            Z = Z.drop(columns=Z.index.names, errors='ignore')
-                            for agg in self.aggregates:
-                                df = (Z
-                                    .groupmy(union('crse_code',self.subpops,agg))
-                                    .agg({'prediction':'sum', 'cv_score':'max'})
-                                    # .join(pred.get_enrollments()[agg].loc[crse_code]['stable'])
-                                    .join(pred.get_enrollments()[agg]['stable'])
-                                    .fillna(0)
-                                    .assign(
-                                        prediction_term_code=pred_term,
-                                        model_term_code=modl_term,
-                                        error=lambda X: X['prediction'] - X['stable'],
-                                        error_pct=lambda X: X['error'] / X['stable'].replace(0, pd.NA) * 100,
-                                    ))
-                                if not pred.is_learner:
-                                    df[['stable','error','error_pct']] = pd.NA
-                                dct.setdefault(agg,[]).append(df[['prediction_term_code','model_term_code','prediction','stable','error','error_pct','cv_score']])
-            srt = lambda X: X.sort_values(list(X.columns), ascending=['term_code' not in k for k in X.columns])
-            with no_warn():
-                return {agg: srt(pd.concat(L).reset_index().prep()) for agg, L in dct.items()}
-        return self.run(fcn, f'forecasts/{self.date}/{self.term_code}', self.setup, suffix='.pkl', **kwargs)[0]
+            def fcn1(agg):
+                group = join(union('crse_code', self.subpops, agg, 'prediction_term', 'cohort_term', 'model_term'))
+                qry = f"select {group}, sum(prediction*mlt) as prediction, max(cv_score) as cv_score {self.subqry()} where crse_code<>'_proba' group by {group}"
+                df = run_qry(qry).merge(self.get_enrollmentsall()[agg]['actual'].rename_axis(index={'term_desc':'prediction_term'}).reset_index(), how='left').fillna(0)
+                df.loc[df.eval('cohort_term == @self.term_desc'), 'actual'] = pd.NA
+                df['error'] = df['prediction'] - df['actual']
+                df['error_pct'] = df['error'] / df['actual'].replace(0, pd.NA) * 100
+                df['cv_score'] = df.pop('cv_score')
+                df.loc[df.eval('prediction_term == @self.term_desc'), ['actual', 'error', 'error_pct']] = pd.NA
+                return self.srt(df)
+            return {agg: fcn1(agg) for agg in self.aggregates}
+        return self.run(fcn, f'{nm}/{self.date}/{self.term_code}', self.get_predictionsall,  suffix='.pkl', **kwargs)[0]
 
 
-    def get_reports(self):
-        self.get_forecasts()
+    def get_amp(self):
+        rpts = {
+            'summary':lambda df: df.query(f"prediction_term==prediction_term.max() & model_term==model_term.max()").loc[:,:'prediction'],
+            'details':lambda df: df,
+        }
+        rpts = {rpt: {agg: fcn(df).round().prep() for agg, df in self.get_forecasts().items()} for rpt, fcn in rpts.items()}
+        P = self.get_spriden().merge(self.get_proba(), how='right')
+        Q = P.query(f'_tot_sch > 0') if LAG > 0 else P.query(f"prediction_term==prediction_term.max() & model_term==model_term.max()")
+        rpts['students'] = {join(s): df for s, df in Q.groupmy(self.subpops)}
+        # rpts['students'] = {join(s): df for s, df in self.get_spriden().merge(self.get_proba().query(f"prediction_term==prediction_term.max() & model_term==model_term.max()").drop(columns='actual'), how='right').groupmy(self.subpops)}
+
         instructions = pd.DataFrame({f"Admitted Matriculation Projections (AMP) for {self.date}":[
             f'''Executive Summary''',
             f'''AMP is a predictive model designed to forecast the incoming (not continuing) Fall cohort to help leaders proactively allocate resources (instructors, sections, labs, etc) in advance.''',
@@ -70,8 +99,9 @@ class AMP(Core):
             f'''Definitions''',
             f'''crse_code = course code (_headcnt = total headcount)''',
             f'''styp_desc = student type; returning = re-enrolling after a previous attempt (not continuing)''',
-            f'''prediction_term_code = cohort being forecast''',
-            f'''model_term_code = cohort used to train AMP''',
+            f'''prediction_term = term being forecast''',
+            f'''cohort_term = cohort being forecast''',
+            f'''model_term = cohort used to train AMP''',
             f'''prediction = forecast headcount''',
             f'''*actual = true headcount''',
             f'''*error = prediction - actual''',
@@ -124,20 +154,22 @@ class AMP(Core):
                 sheet.column_dimensions[column[0].column_letter].width = width
             sheet.freeze_panes = "A2"
 
-        for rpt, fcn in {
-            'summary':lambda df: df.query(f"prediction_term_code=={self.term_code}").loc[:,:'prediction'],
-            'details':lambda df: df,
-            }.items():
-            nm, dst = self.get_dst(f'reports/{self.date}/{rpt}', suffix='.xlsx')
+        def write_xlsx(rpt, sheets):
+            nm, dst = self.get_dst(f'amp/{self.date}/{rpt}', suffix='.xlsx')
             reset(dst)
             print(f'creating {dst}', end=': ')
             with codetiming.Timer():
                 src = "./report.xlsx"
-                sheets = {'instructions':instructions} | {agg: fcn(df).query('crse_code!="_proba"').round().prep() for agg, df in self.get_forecasts().items()}
+                sheets = {'instructions':instructions} | sheets
                 with pd.ExcelWriter(src, mode="w", engine="openpyxl") as writer:
                     for sheet_name, df in sheets.items():
+
                         df.to_excel(writer, sheet_name=sheet_name, index=False)
                         format_xlsx(writer.sheets[sheet_name])
                 shutil.copy(src, dst)
                 rm(src)
             print(divider)
+            return sheets
+
+        [write_xlsx(rpt, sheets) for rpt, sheets in rpts.items()]
+        return rpts
